@@ -1,8 +1,0 @@
-WARNING >>>>> SALBEDO--spectral range exceeded
-
-######################################################################
-
-&INPUT
-  iout=11 idatm=0 wlinf=0.25 wlsup=20 wlinc=-0.01
-  zout=0,50 zgrid1=.5 zgrid2=5 ngrid=100
-  isalb=4 csza=  /

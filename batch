@@ -20,7 +20,7 @@ for zmode in 0; do # zenith angle mode
           post=$post spinup=$spinup mode=$mode pmode=$pmode zmode=$zmode ./run # easy peasy yo
         else # background
           post=$post spinup=$spinup mode=$mode pmode=$pmode zmode=$zmode \
-            ./run &>${expname}.log & # easy peasy yo
+            ./run &>results/${expname}.log & # easy peasy yo
         fi
       done
     done

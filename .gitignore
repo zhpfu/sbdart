@@ -1,8 +1,8 @@
 # Specific ones #
 #################
-*/*
+src
 sbdart
-  # stop syncing subdirectories and the executable
+  # stop syncing source code and the executable
 
 # VIM extras #
 ##############
@@ -14,6 +14,10 @@ sbdart
 # R history #
 #############
 .Rhistory
+
+# Python    #
+#############
+.ipynb_checkpoints
 
 # Temp files #
 ##############
