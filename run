@@ -1,0 +1,310 @@
+#!/usr/bin/env bash
+# This file runs SBDART to derive radiative timescale calculations
+# at various points in the atmosphere
+# READ MANABE ET AL 1964: https://journals.ametsoc.org/doi/abs/10.1175/1520-0469(1964)021%3C0361:TEOTAW%3E2.0.CO%3B2
+# THEY GIVE SUGGESTIONS FOR THE MODEL TIMESTEPS, ZENITH ANGLES, ET CETERA
+# * Remember to think of single model run as just a beam (pew) of radiation from
+#   the sun through the layers and letting it get scattered/absorbed/reflected
+#   everywhere at the speed of light, or as a bunch of beams (pew pew pew) as
+#   sending out longwave beams from every layer/the surface and letting them do
+#   their thing
+# * From these 'instantaneous beam reflections', can determine what the heating rate
+#   would be assuming the beam is continued indefinitely (using convergence of
+#   the fluxes and heat capacities and stuff); then can perturb the atmosphere
+#   profile by (delta_t * Q), run the model again, and repeat for a bunch of timesteps
+# * Can spit out the atmospheric profile results using iout=11; will give heating
+#   rate along with a bunch of other stuff. Then can increment the temperature profile
+#   using a python HEREDOC, re-run it, and boom. Quick and easy.
+# * Note the results will not be the same as Manabe and Strickler (1965) which
+#   considered convective adjustment; this is just what radiation 'wants' to do
+#   to the profile if you attach a leash to the parcels at each level and prevent
+#   them from exchanging information
+
+# Initial stuff
+# Call this script with pnum=1 mode=default to set stuff from outside
+# set -e # exit if error
+[ -z $post   ] && post=false     # only do post-processing and nothing else?
+[ -z $spinup ] && spinup=true    # do spinup, or do perturbation? must choose one or other
+[ -z $pmode  ] && pmode=tropical # experiment number
+[ -z $mode   ] && mode=default   # experiment types
+[ -z $zmode  ] && zmode=1        # 1 for 24-hour cosine zenith average
+[ -z $delete ] && delete=true
+# [ $# -le 1 ] && echo "Error: Must declare experiment type." && exit 1
+# echo $mode
+# echo $pnum
+
+# Base directory
+case $HOSTNAME in
+  monde*)  scratch=/mdata1/ldavis ;;
+  euclid*) scratch=/home/ldavis ;;
+  *)       echo "Error: Uknown host \"$HOSTNAME\"." && exit 1 ;;
+esac
+
+# Determine namelist settings and directory for expeirment
+# * For convection, do the same thing; figure out how to get liquid water
+#   paths for convective cloud and stuff
+# * Cirrus is tricky; need to set usrcld.dat with cloud data
+#   that tabulates cloud frozen water path (or effective radius, from which
+#   distribution of radii is generated); should put this at 10km by
+#   default according to this: https://en.wikipedia.org/wiki/Cirrus_cloud
+case $mode in # parse atmosphere type
+  default) modenml="" ;; # nothing special here
+  co2)     modenml="xco2=720" ;; # default was 360 (rad docs); units are ppm
+  cirrus)  modenml="tcloud=<tcloud> zcloud=8 nre=10" ;;
+  convect) modenml="" ;;
+  *) echo "Error: Unknown experiment mode \"$mode\"." && exit 1 ;;
+esac
+case $zmode in # parse zenith angle mode
+  0) ;; # no solar radiation at all
+  1) case $pmode in # average csza over 24 hours
+    tropical)  csza=0.318 ;;
+    tropicalW) csza=0.292 ;;
+    tropicalS) csza=0.292 ;;
+    arcticS)   csza=0.362 ;;
+    arcticW)   csza=0.017 ;;
+  esac ;;
+  2) case $pmode in # average csza during daytime
+    tropical)  csza=0.631 ;;
+    tropicalW) csza=0.579 ;;
+    tropicalS) csza=0.579 ;;
+    arcticS)   csza=0.470 ;;
+    arcticW)   csza=0.075 ;;
+  esac ;;
+  3) case $pmode in # solar noon values
+    tropical)  csza=1 ;;
+    tropicalW) csza=0.917 ;;
+    tropicalS) csza=0.917 ;;
+    arcticS)   csza=0.803 ;;
+    arcticW)   csza=0.114 ;;
+  esac ;;
+  *) echo "Error: Unknown zenith angle mode \"$zmode\"." && exit 1
+esac
+case $pmode in # parse profile types
+  tropical*) idatm=1 isalb=4 ;;
+  arcticS)   idatm=4 isalb=6 ;;
+  arcticW)   idatm=5 isalb=1 ;;
+  *) echo "Error: Unknown profile ${pmode}." && exit 1 ;;
+esac
+
+# Prepare directory for running model
+# Also *ENTER* directory, everything from now on is inside it
+workdir="$(pwd)" # the current directory
+expdir=$scratch/sb_${pmode}${zmode}_${mode}
+echo "Experiment type \"$mode\" in atmosphere type \"$pmode\"."
+[[ ! -d $expdir ]] && mkdir $expdir # make directory
+cd $expdir # run model here
+cp $workdir/sbdart ./ # copy executable here
+pwd
+
+# Timing
+# * Need to check out atmosphere profile.
+# * Only do the spinup *once*, then restore the saved atms.dat file. Will store
+#   that file in the directory under the name spinup.dat.
+# * Add options for doing spinup, or running the model from scratch. If finish
+#   spinup, should reset time counter.
+# * Will be obvious if timestep was too large when the vertical profile looks
+#   like a zigzag. Try timestep 100 hours and see the whole troposphere is zaggy.
+dtspinup=6 # hours
+dtspinup=8 # 8 hours as in Manabe, because why the fuck not
+dtspinup=24 # medium for now
+tspinup=$((24*3000)) # run the spinup experiments
+dtperturb=24
+tperturb=$((24*1000)) # try 300 days, middle amount
+fstring="%05d" # for printf statement
+
+# Resolution and other settings
+# Try different things out here; turns out maximum possible number of levels is ngrid=65
+# gridnml="zgrid1=.5 zgrid2=10 ngrid=200"
+smooth=0 # turn on heating profile smoothing?
+gridnml="zgrid1=.5 zgrid2=30 ngrid=65"
+if [ $zmode == 0 ]; then # idea of fixing surface temperature
+  # Current idea, with only a fixed surface temperature, then atmosphere adjusting to that
+  rm albedo.dat # if it exists
+  wavenml="wlinf=4 wlsup=20 wlinc=-0.01"
+  forcenml="btemp=330 csza=0 isalb=0 albcon=0" # manually setting surface temperature; then let the
+    # layers adjust to be in equilibrium, w.r.t. longwave radiation, with surface
+else
+  # Previous idea, with solar radiation, but had major major issues with this
+  wavenml="wlinf=0.25 wlsup=20 wlinc=-0.01"
+  # Simple input, fails
+  # NF selects solar spectrum
+  rm albedo.dat
+  forcenml="csza=$csza isalb=0 albcon=0 nf=1" # try input
+  # Try fancy schmancy albedo
+  # rm albedo.dat
+  # forcenml="csza=$csza isalb=7"
+  # Try using a custom albedo file
+  # cp ../albedo.dat ./
+  # forcenml="csza=$csza isalb=-1" # try input
+  # Try changing resolution
+  # rm albedo.dat
+  # wavenml="wlinf=0.25 wlsup=15 wlinc=-0.001" # double that shit
+  # forcenml="csza=$csza isalb=0 albcon=0" # try fancy schmancy thing
+  # Try using isotropic boundary conditions
+  # forcenml="ibcnd=1 fisot=108" # equals (1367/4)/pi, because doc says units are per steradian
+fi
+
+################################################################################
+# Create function for integrating the model and formatting the output
+# This is meant to share the common requirements for both the spinup expeirments
+# and the perturbation experiments, so don't have to repeat ourselves
+function INTEGRATE() {
+  # Inital stuff
+  # Rigorous checks against my stupidity and because bash loves empty variables, yay
+  [[ -z $t || -z $dt || -z $ft ]] && echo "Error: One of the time variables is not set." && exit 1
+  [[ -z $output ]] && echo "Error: The output file variable is not set." && exit 1
+  [[ $t -eq $ft ]] && increment=0 || increment=1 # whether to increment atms.dat
+  local display=$(($t/$dt % 9)) # whether to display extra info
+  [ $display -eq 0 ] && echo "Time: $(($t/$dt)) out of $(($ft/$dt))."
+
+  # Create namelist
+  # * Used test experiment 3 as starting point; we are interested in longwave
+  #   exchange here, but could also go to solar wavelengths possibly
+  # * Set solar zenith angle to 95 meaning this is 'nighttime'; we are just
+  #   interested in the longwave; documentation mentions solar input can be
+  #   turned off by setting sza>90, so this is recommended approach
+  # * Will try using Earth actual albedo here, and change the grid to
+  #   a much higher resolution (TOA is top of stratosphere, at 50km)
+  echo "&INPUT $wavenml iout=11 idatm=0 $forcenml $gridnml $modenml /" >INPUT
+
+  # Run model
+  ./sbdart > $output # output for given timestep
+  if [ $display -eq 1 ] && compgen -G "SBDART_WARNING*" &>/dev/null; then
+    for warning in SBDART_WARNING*; do
+      echo "WARNING $warning GENERATED"
+      # cat $warning # echo any warnings
+      # [ $warning == "SBDART_WARNING.06" ] && \
+      #   echo "ERROR: TEMPERATURE DIFFERENCES BETWEEN LAYERS TOO BIG." && exit 1
+    done
+    rm SBDART_WARNING* # remove old warnings first
+  fi
+
+  # Fuck with previous model results; this may be
+  # * In this step, will add temperature to the original results
+  #   so that everything is in one place. Makes way more sense.
+  python << EOF
+import numpy as np
+# Figure out heating rate at layer centers, not layer edges.
+# Note default model output is *top to bottom*, while atms.dat is *bottom to
+# top* for some reason; will flip the default output.
+# * By default level '0' always has no heating, and heating the subsequent
+#   indices refer to heating between layer i and layer i-1
+# * Assume that dfdz is function is just (f2-f1)/deltaZ, which means the implied
+#   location is exactly halfway between those two layers.
+# * Will use edge values for top and bottom layers; this is more conceptually
+#   accurate than an extrapolation, as there is no other 'source' lying
+#   between the edges and the top layer center (located at 'space' boundary)
+#   and bottom layer center (located at surface)
+data = np.loadtxt('$output', skiprows=1) # the full original data matrix
+if data.size==0: raise ValueError("Empty data file.")
+data = np.flipud(data) # make the data go from surface to top
+zcenters = data[:,0] # will weight interpolation by height
+zedges = (zcenters[1:]+zcenters[:-1])/2 # edges *between* centers
+for i in (-2,-1): # the stuff in data arraay calculated on 'edges'
+    dedges = data[:-1,i] # the first entry (TOA position) in original output was dummy
+    dz1, dz2 = zedges[1:]-zcenters[1:-1], zcenters[1:-1]-zedges[:-1] # widths
+    dcenters = (dz1*dedges[1:] + dz2*dedges[:-1])/(dz1+dz2) # simple interpolation
+    dcenters = np.concatenate((dedges[:1], dcenters, dedges[-1:])) # concatenate centers
+    # print('Data at edges and centers:',data[:,i],dcenters) # weird python OOP thing means if you print dedges
+    #   # after the assignment below, shows view into array; so put print statement here
+    data[:,i] = dcenters # overwrite with new data
+# Add temperature to the old file
+profile = np.loadtxt('atms.dat', skiprows=1) # previous profile
+data = np.concatenate((data, profile[:,2:3]), axis=-1) # add a new 'temperature' column
+np.savetxt('$output', data, comments='', header=10*' '+str(profile.shape[0]),
+    delimiter='  ', fmt='%.9E') # the string 'comments' is pre-pended to header and footer
+# Increment atms.dat for the next run
+if $increment: # i.e. if we are not on the last timestep
+  dt = $dt/24 # from units hours to days
+  heating = data[:,-2] # the 2nd to last position
+  if $smooth:
+      heating = np.concatenate((heating[:2].mean(keepdims=True), # average of endpoints
+          (0.5*heating[2:]+heating[1:-1]+0.5*heating[:-2])/2, # trapezoidal smoother
+          heating[-2:].mean(keepdims=True)) # as at the other end
+          ) # try smoothing out heating rates to prevent 'sawtooth' profile
+  if $display==0:
+      heatid = np.argmax(np.abs(heating*dt))
+      print('Original temp:', *(f'{h:.0f}|{p:.1f}' for h,p in zip(profile[:,1], profile[:,2])))
+      print('Incrementing temp:', *(f'{h:.0f}|{p:.3g}' for h,p in zip(profile[:,1], heating*dt)))
+      print('Average increment:', np.abs(heating*dt).mean())
+      print('Maximum increment:', np.max(np.abs(heating*dt)))
+      print(f'Level of maximum increment: {profile[heatid,0]:.5f}km ' + 
+            f'or {profile[heatid,1]:.5f}mb or {heatid:d} out of {profile.shape[0]:d}.')
+  profile[:,2] += heating*dt # increment temperature
+  fmts = ('%11.3f', *('%.9E' for i in range(4))) # match SBDART conventions
+  np.savetxt('atms.dat', profile, comments='', header=10*' '+str(profile.shape[0]),
+      delimiter='  ', fmt=fmts) # the string 'comments' is pre-pended to header and footer
+EOF
+    [ $? != 0 ] && echo "Error: Python code had error." && exit 1
+}
+
+##############################################################################
+# Create spinup profile; start with the desired atmospheric profile
+# * Use idatm=-1, -2, etc. to just print the model data
+#   associated with abs(idatm) then quit.
+# * Format is height (km), pressure (mb), temp (K), water vapor density (g/m3),
+#   and ozone density (g/m3); single number on first line indicates number of levels
+if $spinup && ! $post; then
+  t=0 # intial time
+  ft=$tspinup # final time
+  dt=$dtspinup # increment time
+  $delete && rm spinup*.txt spinup*.dat # remove previous output
+  echo "&INPUT $gridnml idatm=-$idatm $(echo "$profilenml" | sed 's/idatm=/idatm=-/g') /" >INPUT
+  ./sbdart > atms.dat # will increment this temperature; note that we assume cloud
+  echo "&INPUT $wavenml iout=1 idatm=0 $forcenml $gridnml $modenml /" >INPUT
+  ./sbdart > spinup.init # initial data
+  output="" # old
+  while [ $t -le $ft ]; do # less then equal to
+    # Run model
+    output=spinup$(printf "$fstring" "$t").txt
+    atmsdat=spinup$(printf "$fstring" "$t").dat
+    ! $delete && [ -e $output ] && echo "File \"${output##*/}\" exists. Skipping." && t=$(($t+$dt)) && continue
+    cp atms.dat $atmsdat # save original atms.dat
+    INTEGRATE # whether to display data
+    t=$(($t + $dt)) # increment time
+  done
+  cp atms.dat spunup.dat # save the current profile in here
+fi
+
+##############################################################################
+# Model +1K experiments, run after getting equilibrium
+# * Use existing spunup.dat file in some directory.
+if ! $spinup && ! $post; then
+  t=0 # intial time
+  ft=$tperturb # number of timesteps for perturbation
+  dt=$dtperturb # time step
+  $delete && rm perturb*.txt perturb*.dat # remove previous output
+  [ ! -r spunup.dat ] && echo "Error: Spunup profile \"spunup.dat\" not found." && exit 1
+  cp spunup.dat atms.dat # the spunup profile
+  python <<EOF
+import numpy as np
+profile = np.loadtxt('atms.dat', skiprows=1) # previous profile
+print('Incrementing spunup profile by +1K.') # message
+profile[:,2] += 1 # increment by 1Kelvin
+fmts = ('%11.3f', *('%.9E' for i in range(4))) # match SBDART conventions
+np.savetxt('atms.dat', profile, comments='', header=10*' '+str(profile.shape[0]),
+    delimiter='  ', fmt=fmts) # the string 'comments' is pre-pended to header and footer
+EOF
+  output="" # old
+  while [ $t -le $ft ]; do # less then equal to
+    # Run model
+    output=perturb$(printf "$fstring" "$t").txt
+    atmsdat=spinup$(printf "$fstring" "$t").dat
+    ! $delete && [ -e $output ] && echo "File \"${output##*/}\" exists. Skipping." && t=$(($t+$dt)) && continue
+    cp atms.dat $atmsdat # save original atms.dat
+    INTEGRATE # whether to display data
+    t=$(($t + $dt)) # increment time
+  done
+fi
+
+##############################################################################
+# Post-process the experiment results
+# * Can get weird error if try to overwrite something already loaded
+#   with xarray in a notebook. So make sure to rm -f it first.
+if $spinup; then
+  [ -e ${expdir}_spinup.nc ] && rm -f ${expdir}_spinup.nc
+  $workdir/postprocess "spinup*.txt"
+else
+  [ -e ${expdir}_perturb.nc ] && rm -f ${expdir}_perturb.nc
+  $workdir/postprocess "perturb*.txt"
+fi

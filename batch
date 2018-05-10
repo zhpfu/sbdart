@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Quick batch script for running a bunch
+# of model runs and stuff and shit, whatever mate
+# for mode in default co2; do
+#   for pmode in tropical arcticW; do
+#     [ $mode == "default" ] && [ $pmode == "tropical" ] && continue
+# for mode in co2; do
+#   for pmode in arcticW; do
+#     for spinup in true false; do
+post=true # by default, not post processing
+for zmode in 0; do # zenith angle mode
+  for mode in default co2; do
+    for pmode in tropicalW arcticW; do
+      # for spinup in true false; do # just spinup
+      for spinup in true; do # just spinup
+        $spinup && suffix=spinup || suffix=perturb
+        expname=${pmode}${zmode}_${mode}_${suffix}
+        echo "Expname: \"${expname}\"."
+        if $post; then
+          post=$post spinup=$spinup mode=$mode pmode=$pmode zmode=$zmode ./run # easy peasy yo
+        else # background
+          post=$post spinup=$spinup mode=$mode pmode=$pmode zmode=$zmode \
+            ./run &>${expname}.log & # easy peasy yo
+        fi
+      done
+    done
+  done
+done

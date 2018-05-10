@@ -1,0 +1,48 @@
+#!/usr/bin/env python
+# This function processes results printed
+# as tables to each directory
+import os
+import numpy as np
+import xarray as xr
+import glob
+import sys
+# Put everything into single numpy array
+# Optionally iterate through all experiments
+# experiments = [d for d in glob.glob('*/') if d[:3]!='src']
+# for experiment in experiments:
+pattern = sys.argv[-1]
+files = sorted(glob.glob(pattern))
+if len(files)==0:
+    print(f'No files with pattern {pattern} found.')
+else:
+    print(f'Post-processing files with pattern {pattern}.')
+    prefix = pattern.split('/')[-1].split('*')[0] # file prefix
+    expname = os.path.abspath(pattern).split('/')[-2] # the experiment name
+    initdata = np.loadtxt(files[0], skiprows=1)
+    z = initdata[:,0] # height
+    p = initdata[:,1] # pressure
+    times, datas = [], []
+    for file in files:
+        data = np.loadtxt(file, usecols=(2,3,5,6,7), skiprows=1) # exclude z/p and direct beam
+        datas.append(data[:,:,None]) # includes flux down, flux up, flux divergence, heating, and temperature
+        times.append(int(file.split(prefix)[-1].split('.txt')[0])) # the observation timestep
+        # print(int(file.split(f'/{prefix}')[-1].split('.txt')[0]))
+    data = np.concatenate(datas, axis=-1) # final axis is now time dimension
+    # Create NetCDF file with XArray from that
+    # Syntax is to say dataset['name'] = (<dim list>, <data>, [<attr dictionary>]) or equivalently
+    # when declaring dataset, with Dataset({'var1': above_tuple_1, 'var2': above_tuple_2})
+    names = ['fdown', 'fup', 'dfdz', 'dtempdz', 'temp']
+    longs = ['downward flux', 'upward flux', 'flux divergence', 'heating rate', 'temperature']
+    units = ['W/m2', 'W/m2', 'W/m3', 'K/day', 'K']
+    dataset = xr.Dataset(coords={
+            'level': ('level', np.arange(data.shape[0]), {'long_name':'level number'}),
+            'time': ('time', times, {'long_name':'time', 'units':'hours'}),
+            }) # initialize with just coordinates
+    dataset['z'] = ('level', z, {'long_name':'altitude', 'units':'km'})
+    dataset['p'] = ('level', p, {'long_name':'pressure', 'units':'mb'}) # add height and pressure
+    for i,name in enumerate(names):
+        scale = 1e-3 if 'divergence' in name else 1
+        dataset[name] = (('level','time'), scale*data[:,i,:], {'long_name':longs[i], 'units':units[i]}) # create height by time data
+    directory = '/'.join(os.path.abspath(files[0]).split('/')[:-1]) # the original directory # the original directory
+    print(f'{directory}_{prefix}.nc')
+    dataset.to_netcdf(f'{directory}_{prefix}.nc') # save in parent directory

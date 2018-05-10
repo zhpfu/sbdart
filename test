@@ -1,0 +1,208 @@
+#!/usr/bin/env bash
+# Usage:   bash test_runs [1] [2] [3] [4] [5]
+#
+# Quick summary of namelist params:
+# * sza: solar zenith angle
+# * wlinf and wlsup: minimum and maximum domain wavelengths, possibly menaing 'infimum' and 'supremum'
+# * wlinc: discrete spacing of the wavelengths
+# * albcon: spectrally uniform surface albedo
+# * isat: filter function for handling discrete wavelength-cutoffs for the infimum
+#   wavelength and supremum wavelength; default is no special filter, just linear weighting
+#   between them
+# * idatm: atmosphere type; table is below:
+#     0 User Specified
+#     1 TROPICAL                     4.117         0.253   .0216
+#     2 MID-LATITUDE SUMMER          2.924         0.324   .0325
+#     3 MID-LATITUDE WINTER          0.854         0.403   .0336
+#     4 SUB-ARCTIC SUMMER            2.085         0.350   .0346
+#     5 SUB-ARCTIC WINTER            0.418         0.486   .0340
+#     6 US62                         1.418         0.349   .0252
+# * tcloud: optical thickness of cloud layer at wavelength 550nm; then
+#   the optical depth at other wavelengths is determined by scaling by the
+#   extinction efficiency Q(wavelength)/Q(550nm), where extinction efficiency is determined
+#   by integrating the wavelength-wise extinction over reasonable droplet/ice crystal radii
+# * nre: cloud effective radius, in microns (perhaps the extinction cross-section?), then
+#   the drop size distribution follows a gamma distribution relative to that reference
+#   drop size
+root="sbtest" # root name of output file
+if [ $# -eq 0 ] ; then 
+  # do1=1; do2=1; do3=1; do4=1; do5=1
+  echo "Error: Must declare experiment number to run." && exit 1
+else
+  for i in $@; do 
+    case $i in
+    1) do1=1;;  
+    2) do2=2;;
+    3) do3=3;;
+    4) do4=4;;
+    5) do5=5;;
+    esac
+  done
+fi
+
+############################################################
+# Example 1: SW spectral irradiance
+############################################################
+if [ $do1 ] ; then
+output=${root}_1.txt
+cat > INPUT <<EOF
+&INPUT
+  idatm=4
+  isat=0
+  wlinf=.25 wlsup=1.0 wlinc=.005
+  iout=1
+/
+EOF
+echo running example 1
+./sbdart > $output
+fi
+
+############################################################
+# Example 2: vary optical depth and surface albedo
+############################################################
+if [ $do2 ] ; then 
+echo running example 2 
+# Loop through cloud optical depths
+albcon=.5 # for reference
+output=${root}_21.txt
+[ -r $output ] && rm $output
+for tcloud in 0 1 2 4 8 16 32 64; do 
+cat > INPUT <<EOF
+ &INPUT
+ tcloud=$tcloud
+ albcon=$albcon
+ idatm=4
+ isat=0
+ wlinf=.55
+ wlsup=.55
+ isalb=0
+ iout=10
+ sza=30
+/
+EOF
+printf "%3d " "$tcloud" >> $output
+./sbdart >> $output
+done
+# Loop through albedos
+tcloud=0
+output=${root}_22.txt
+[ -r $output ] && rm $output
+for albcon in 0 .2 .4 .6 .8 1; do 
+cat > INPUT <<EOF
+ &INPUT
+ tcloud=$tcloud
+ albcon=$albcon
+ idatm=4
+ isat=0
+ wlinf=.55
+ wlsup=.55
+ isalb=0
+ iout=10
+ sza=30
+/
+EOF
+printf "%5.3f " "$albcon" >> $output
+./sbdart >> $output
+done
+fi
+
+############################################################
+# Example 3: spectral output in thermal IR 
+# * this just prints the longwave spectrum in the presence
+#   of a few different cloud optical depths; this time we place
+#   the cloud at height zcloud, easy peasy
+# * as is common with atmospheric Fortran models, a negative
+#   namelist param implies different meaning, not negative number;
+#   the -ve wlinc means increment the wavelengths by this *constant fraction
+#   of the current wavelength*, instead of some constant 'delta_wavelength'
+#   offset (this weighting uses the left-wavelength before incrmenting)
+#   an example for wlinc stated in README was indeed -0.1; gives 5nm resolution
+#   in shortwave and 0.2um resolution in longwave, which is good compromise
+# * for this experiment, you can just change a couple parameters
+#   and see what happens
+############################################################
+if [ $do3 ] ; then
+echo running example 3
+output=${root}_3.txt
+[ -r $output ] && rm $output
+cat > INPUT <<EOF
+ &INPUT
+  tcloud=$tcloud
+  zcloud=8
+  nre=10
+  idatm=4
+  sza=95
+  wlinf=4
+  wlsup=20
+  wlinc=-.01
+  iout=1
+/
+EOF
+./sbdart >> $output
+fi
+
+#########################################################################
+# Example 4: demonstration of Nakajima and King
+# * have not yet re-organized the output format; need to do that à la
+#   example 2
+# * replicates Figure 2 from the 1990 paper, should plot results from 0.55
+#   microns against results from 2.16 microns
+# * iout will spit out vector, then can plot optical depth at wavelength A against
+#   optical depth at wavelength B, similar to 'refelction function', and create
+#   lines for each droplet radius shown there
+#########################################################################
+if [ $do4 ] ; then
+echo running example 4
+output=${root}_4.txt
+[ -r $output ] && rm $output
+for tcloud in 0 1 2 4 8 16 32 64 128; do
+for nre in 2 4 8 16 32 64 128; do 
+for wl in .55 2.16; do 
+cat > INPUT <<EOF
+&INPUT
+ tcloud=$tcloud
+ nre=$nre
+ wlinf=$wl
+ wlsup=$wl
+ idatm=1
+ isat=0
+ isalb=4
+ iout=10
+ sza=0
+/
+EOF
+./sbdart >> $output
+done
+done
+done
+fi
+
+#########################################################################
+# Example 5: Radiance at surface and TOA
+# * finally this function spits out the familiar spectrum-integrated
+#   radiation output, alongside 
+# * iout 20 prints just TOA information; 
+#########################################################################
+if [ $do5 ] ; then
+echo running example 5
+output=${root}_5.txt
+[ -r $output ] && rm $output
+for tcloud in 5 15 ; do 
+cat > INPUT <<EOF
+&INPUT
+  tcloud = $tcloud
+  zcloud = 1
+  wlinf  = .72
+  wlsup  = .72
+  idatm  = 1
+  isalb  = 4
+  sza    = 60
+  iout   = 23
+  nstr   = 20
+  uzen=  5,15,25,35,45,55,65,75,85,95,105,115,125,135,145,155,165,175
+  phi=0,15,30,45,60,75,90,105,120,135,150,165,180
+/
+EOF
+./sbdart >> $output
+done
+fi
