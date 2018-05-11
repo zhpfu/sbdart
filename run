@@ -250,9 +250,9 @@ if $spinup && ! $post; then
   dt=$dtspinup # increment time
   $delete && rm spinup*.txt spinup*.dat # remove previous output
   echo "&INPUT $gridnml idatm=-$idatm $(echo "$profilenml" | sed 's/idatm=/idatm=-/g') /" >INPUT
-  ./sbdart > atms.dat # will increment this temperature; note that we assume cloud
+  ./sbdart > atms.dat # get initial temperature profile, using -idatm
   echo "&INPUT $wavenml iout=1 idatm=0 $forcenml $gridnml $modenml /" >INPUT
-  ./sbdart > spinup.init # initial data
+  ./sbdart > spinup.init # get initial top/bottom spectrum
   output="" # old
   while [ $t -le $ft ]; do # less then equal to
     # Run model
